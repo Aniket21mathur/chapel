@@ -990,41 +990,87 @@ module Random {
         return _choice(this, arr, size=size, replace=replace, prob=prob);
       }
 
-      /* Randomly shuffle a 1-D array. */
-      proc shuffle(arr: [?D] ?eltType ) {
+      pragma "no doc"
+      proc _fisherYatesShuffle(arr : [?D], start : int, blockSize : int, seed: int) {
+        for i in start+1..#blockSize-1 {
+          var k = randlc_bounded(D.idxType,
+                                 PCGRandomStreamPrivate_rngs,
+                                 seed, PCGRandomStreamPrivate_count,
+                                 start+1, i);
+          arr[i] <=> arr[k];
+        }
+      }
+
+      pragma "no doc"
+      proc _mergeShuffleMerge(arr : [?D], start : int, lArraySize : int, totalSize : int, seed: int) {
+        var i = start;
+        var j = start + lArraySize;
+        var n = start + totalSize;
+
+        while true {
+          var k = randlc_bounded(D.idxType,
+                                 PCGRandomStreamPrivate_rngs,
+                                 seed, PCGRandomStreamPrivate_count,
+                                 0, 1);
+          if k == 0 {
+            if i == j then break;
+          } else {
+            if j == n then break;
+            arr[i] <=> arr[j];
+            j += 1;
+          }
+          i += 1;
+        }
+
+        while i < n {
+          var k = randlc_bounded(D.idxType,
+                                 PCGRandomStreamPrivate_rngs,
+                                 seed, PCGRandomStreamPrivate_count,
+                                 start, i);
+          arr[i] <=> arr[k];
+          i += 1;
+        }
+      }
+
+      proc shuffle(arr: [?D], const cutoff : int = 10000) {
 
         if D.rank != 1 then
           compilerError("Shuffle requires 1-D array");
 
-        const low = D.alignedLow,
-              stride = abs(D.stride);
-
         _lock();
 
-        // Fisher-Yates shuffle
-        for i in 0..#D.size by -1 {
-          var k = randlc_bounded(D.idxType,
-                                 PCGRandomStreamPrivate_rngs,
-                                 seed, PCGRandomStreamPrivate_count,
-                                 0, i);
+        ref array = arr.reindex(0..arr.size-1);
+        var arraySize = array.size;
+        var c : uint = 0;
+        while((arraySize >> c) > cutoff) {
+          c += 1;
+        }
+        var numOfSplits : int = 1 << c;
 
-          var j = i;
+        forall i in 0..numOfSplits-1 {
+          var start : int = arraySize * i >> c;
+          var end : int = arraySize * (i+1) >> c;
+          _fisherYatesShuffle(array, start, end-start, seed);
+        }
 
-          // Strided case
-          if stride > 1 {
-            k *= stride;
-            j *= stride;
+        iter mergeLevels(const numOfSplits : int) {
+          var mergeLevel : int = 1;
+          while mergeLevel < numOfSplits {
+            yield mergeLevel;
+            mergeLevel += mergeLevel;
           }
+        }
 
-          // Alignment offsets
-          k += low;
-          j += low;
-
-          arr[k] <=> arr[j];
+        for mergeLevel in mergeLevels(numOfSplits) {
+          forall blockIdx in 0..numOfSplits-1 by 2*mergeLevel {
+            var j = arraySize * blockIdx >> c;
+            var k = arraySize * (blockIdx + mergeLevel) >> c;
+            var l = arraySize * (blockIdx + 2*mergeLevel) >> c;
+            _mergeShuffleMerge(array, j, k-j, l-j, seed);
+          }
         }
 
         PCGRandomStreamPrivate_count += D.size;
-
         _unlock();
       }
 
